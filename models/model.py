@@ -4,44 +4,37 @@ import torch.nn.functional as F
 
 from utils.masking import TriangularCausalMask, ProbMask
 from models.encoder import Encoder, EncoderLayer, ConvLayer, EncoderStack
+from models.tcnencoder import *
 from models.decoder import Decoder, DecoderLayer
 from models.attn import FullAttention, ProbAttention, AttentionLayer
 from models.embed import DataEmbedding
+from typing import Callable, Dict, List, Tuple, Union
+
 
 class Informer(nn.Module):
     def __init__(self, enc_in, dec_in, c_out, seq_len, label_len, out_len, 
-                factor=5, d_model=512, n_heads=8, e_layers=3, d_layers=2, d_ff=512, 
+                factor=5, d_model=512, n_heads=8, e_layers=3, d_layers=2, d_ff=2048, 
                 dropout=0.0, attn='prob', embed='fixed', freq='h', activation='gelu', 
-                output_attention = False, distil=True,
+                output_attention = False, distil=True, 
+                time_varying_categoical_variables=2,
+                time_varying_real_variables_encoder=4,
+                time_varying_real_variables_decoder=3,   
                 device=torch.device('cuda:0')):
         super(Informer, self).__init__()
         self.pred_len = out_len
         self.attn = attn
         self.output_attention = output_attention
 
-        # Encoding
+        # embedding
         self.enc_embedding = DataEmbedding(enc_in, d_model, embed, freq, dropout)
         self.dec_embedding = DataEmbedding(dec_in, d_model, embed, freq, dropout)
+
         # Attention
         Attn = ProbAttention if attn=='prob' else FullAttention
         # Encoder
-        self.encoder = Encoder(
-            [
-                EncoderLayer(
-                    AttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
-                                d_model, n_heads),
-                    d_model,
-                    d_ff,
-                    dropout=dropout,
-                    activation=activation
-                ) for l in range(e_layers)
-            ],
-            [
-                ConvLayer(
-                    d_model
-                ) for l in range(e_layers-1)
-            ] if distil else None,
-            norm_layer=torch.nn.LayerNorm(d_model)
+        self.encoder = TCN(input_size=d_model, output_size=d_model,num_channels = [512] * (3) + [512],
+                 kernel_size=2, dropout=0.3, emb_dropout=0.1, tied_weights=False
+            
         )
         # Decoder
         self.decoder = Decoder(
@@ -66,8 +59,9 @@ class Informer(nn.Module):
         
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, 
                 enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
-        enc_out = self.enc_embedding(x_enc, x_mark_enc)
-        enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
+
+        enc_out = self.enc_embedding(x_enc, x_mark_enc)#enc_out[32, 96, 512]
+        enc_out = self.encoder(enc_out)
 
         dec_out = self.dec_embedding(x_dec, x_mark_dec)
         dec_out = self.decoder(dec_out, enc_out, x_mask=dec_self_mask, cross_mask=dec_enc_mask)
